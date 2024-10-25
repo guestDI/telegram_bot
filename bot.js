@@ -1,26 +1,80 @@
 const TelegramBot = require('node-telegram-bot-api');
 const cron = require('node-cron');
-const moment = require('moment-timezone');
+const { getNextEventTime } = require('./utils')
 
 const token = '7630370286:AAGz6H5lbpJ1xDAqDkIV6f_NJcsQgmNMbtQ';
 const bot = new TelegramBot(token, { polling: true });
 
 // Store the chat IDs and users
-let chatMembers = {};
+let chatMembers = [];
+let eventPollId = null;
+let manOfTheMatchPollId = null;
+let eventPollAnswers = [];
+let scheduledTask = null;
 
 // Schedule a poll every Monday at 11:00 AM (server time)
 cron.schedule('0 0 11 * * 1', () => {
   for (const chatId in chatMembers) {
     const eventTime = getNextEventTime();
-    sendPoll(chatId, eventTime);
+    sendEventPoll(chatId, eventTime);
   }
 });
 
+cron.schedule('0 0 21 * * 2', () => {
+    for (const chatId in chatMembers) {
+      const eventTime = getNextEventTime();
+      sendManOfTheMatchPoll(chatId, eventTime);
+    }
+  });
+
+  bot.onText(/\/start/, (msg) => {
+    const chatId = msg.chat.id;
+    
+    const inlineMenu = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'Recurring poll', callback_data: 'schedule_recurring_poll' },
+            { text: 'Event poll', callback_data: 'start_event_poll' },
+            { text: 'Man of the match', callback_data: 'man_of_the_match' },
+          ],
+          [
+            { text: 'Random user', callback_data: 'random_user' },
+          ],
+        ],
+      },
+    };
+  
+    bot.sendMessage(chatId, 'What do you want do:', inlineMenu);
+  });
+
+  bot.on('callback_query', (query) => {
+    const chatId = query.message.chat.id;
+    const userId = query.from.id;
+  
+    if (query.data === 'start_event_poll') {
+      const eventTime = getNextEventTime();
+      sendEventPoll(chatId, eventTime);
+      bot.answerCallbackQuery(query.id, { text: 'Опрос на событие запущен!' });
+    } else if (query.data === 'man_of_the_match') {
+      const eventTime = getNextEventTime();
+      sendManOfTheMatchPoll(chatId, eventTime);
+      bot.answerCallbackQuery(query.id, { text: 'Опрос "Игрок матча" запущен!' });
+    } else if (query.data === 'random_user') {
+      const randomUserId = chatMembers[Math.floor(Math.random() * chatMembers.length)];
+      bot.sendMessage(chatId, `Составы определяет: <a href="tg://user?id=${randomUserId}">${randomUserId}</a>`, { parse_mode: 'HTML' });
+      bot.answerCallbackQuery(query.id, { text: 'Случайный пользователь выбран!' });
+    }
+  });
+
 // Function to send a poll with event time information
-function sendPoll(chatId, eventTime) {
+function sendEventPoll(chatId, eventTime) {
   const eventDateString = eventTime.format('dddd, MMMM Do YYYY, HH:mm');
   bot.sendPoll(chatId, `Football: ${eventDateString}`, ['Yes', 'No'], {is_anonymous: false} )
-    .then(() => {
+    .then((poll) => {
+      eventPollId = poll.poll.id;    
+      chatMembers = [];              
+      eventPollAnswers = [];        
       console.log(`Poll sent to chat ${chatId}`);
     })
     .catch((err) => {
@@ -28,53 +82,73 @@ function sendPoll(chatId, eventTime) {
     });
 }
 
-// Function to get the next event time (Tuesday at 19:00 CET)
-function getNextEventTime() {
-  // Get current time in CET
-  let now = moment().tz('CET');
-  
-  // Start from the next Tuesday
-  let nextTuesday = now.clone().day(2).hour(19).minute(0).second(0);
-
-  // If the current day is already Tuesday past 19:00, go to the next week
-  if (now.isAfter(nextTuesday)) {
-    nextTuesday.add(1, 'week');
+function sendManOfTheMatchPoll(chatId, eventTime) {
+    const eventDateString = eventTime.format('dddd, MMMM Do YYYY');
+    bot.sendPoll(chatId, `Man of the match: ${eventDateString}`, [...chatMembers, '-'] )
+      .then(() => {
+        manOfTheMatchPollId = poll.poll.id;
+        console.log(`Poll sent to chat ${chatId}`);
+      })
+      .catch((err) => {
+        console.error(`Failed to send poll to chat ${chatId}:`, err);
+      });
   }
 
-  return nextTuesday;
-}
-
 bot.on('poll_answer', (pollAnswer) => {
+    const pollId = pollAnswer.poll_id;
     const userId = pollAnswer.user.id;
     const username = pollAnswer.user.username || pollAnswer.user.first_name;
-  
-    console.log(`User ${username} (ID: ${userId}) voted in poll ${pollAnswer.poll_id}`);
+
     
-    // Optionally, you can track user participation or take further action
+    if (pollId === eventPollId) {
+        console.log(`User ${username} (ID: ${userId}) voted in the Event poll.`);
+        chatMembers.push(username); 
+      }
 });
 
 bot.on('message', (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
 
-  // Add chat and member to the tracking list
-  if (!chatMembers[chatId]) {
-    chatMembers[chatId] = new Set();
-  }
-  chatMembers[chatId].add(userId);
-
-  // Command to select a random user
   if (msg.text === '/randomuser') {
-    const membersArray = Array.from(chatMembers[chatId]);
-    const randomUserId = membersArray[Math.floor(Math.random() * membersArray.length)];
+    const randomUserId = chatMembers[Math.floor(Math.random() * chatMembers.length)];
 
-    bot.sendMessage(chatId, `Randomly selected: <a href="tg://user?id=${randomUserId}">${randomUserId}</a>`, { parse_mode: 'HTML' });
+    bot.sendMessage(chatId, `Teams are on: <a href="tg://user?id=${randomUserId}">${randomUserId}</a>`, { parse_mode: 'HTML' });
   }
 
   // Command to manually start a poll
   if (msg.text === '/startpoll') {
     const eventTime = getNextEventTime();
-    sendPoll(chatId, eventTime);
+    sendEventPoll(chatId, eventTime);
+  }
+
+  if (msg.text === '/manofthematch') {
+    const eventTime = getNextEventTime();
+    sendManOfTheMatchPoll(chatId, eventTime);
+  }
+
+  if(msg.text === '/schedule_recurring_poll') {
+    bot.sendMessage(chatId, "Please send me the day and time for scheduling the event in format 'YYYY-MM-DD HH:mm'");
+  
+    bot.once('message', (dateMsg) => {
+      const inputDate = moment(dateMsg.text, 'YYYY-MM-DD HH:mm', true);
+  
+      if (!inputDate.isValid()) {
+        bot.sendMessage(chatId, "Invalid date format. Please use 'YYYY-MM-DD HH:mm'.");
+        return;
+      }
+  
+      const date = inputDate.toDate();
+  
+      const cronExpression = `0 ${date.getMinutes()} ${date.getHours()} * * ${date.getDay()}`;
+  
+      if (scheduledTask) scheduledTask.destroy(); 
+      scheduledTask = cron.schedule(cronExpression, () => {
+        sendEventPoll(chatId, inputDate); 
+      });
+  
+      bot.sendMessage(chatId, `Event scheduled for ${inputDate.format('dddd, MMMM Do YYYY, HH:mm')}`);
+    });
   }
 });
 
