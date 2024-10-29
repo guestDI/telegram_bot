@@ -6,13 +6,15 @@ const moment = require('moment-timezone');
 const token = '7630370286:AAGz6H5lbpJ1xDAqDkIV6f_NJcsQgmNMbtQ';
 const bot = new TelegramBot(token, { polling: true });
 
+const daysMap = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
 // Store the chat members and polls
 let chatMembers = [];
 const peopleToAttend = [];
 let eventPollId = null;
 let manOfTheMatchPollId = null;
 let eventPollAnswers = [];
-const pollTasks = {};
+const pollTasks = new Map(); 
 
 // Inline menu command
 bot.onText(/start/, (msg) => {
@@ -25,7 +27,11 @@ bot.onText(/start/, (msg) => {
           { text: 'Event poll', callback_data: 'send_event_poll' },
           { text: 'Man of the match', callback_data: 'man_of_the_match' },
         ],
-        [{ text: 'Random user', callback_data: 'random_user' }],
+        [
+          { text: 'Random user', callback_data: 'random_user' },
+          { text: 'Show all recurring polls', callback_data: 'show_all_polls' },
+          { text: 'Add participant', callback_data: 'add' },
+        ]
       ],
     },
   };
@@ -37,6 +43,10 @@ bot.onText(/start/, (msg) => {
 bot.on('callback_query', (query) => {
   const chatId = query.message.chat.id;
   const userId = query.from.id;
+
+  if (query.data.startsWith('cancel_poll')) {
+    cancelRecurringPoll(query)
+  }
 
   switch (query.data) {
     case 'schedule_recurring_poll':
@@ -53,13 +63,31 @@ bot.on('callback_query', (query) => {
       bot.answerCallbackQuery(query.id, { text: 'Man of the Match poll started!' });
       break;
 
+    case 'show_all_polls': 
+      showAllPolls(chatId);
+      bot.answerCallbackQuery(query.id);
+      break;  
+
+    case 'add': 
+      addParticipant(chatId);
+      bot.answerCallbackQuery(query.id);
+      break;    
+
     case 'random_user':
       const randomUserId = chatMembers[Math.floor(Math.random() * chatMembers.length)];
-      bot.sendMessage(
-        chatId,
-        `Teams are on: <a href="tg://user?id=${randomUserId}">${randomUserId}</a>`,
-        { parse_mode: 'HTML' }
-      );
+      if(!randomUserId) {
+        bot.sendMessage(
+            chatId,
+            'There are no participants yet'
+          );
+      } else {
+        bot.sendMessage(
+            chatId,
+            `Teams are on: <a href="tg://user?id=${randomUserId}">${randomUserId}</a>`,
+            { parse_mode: 'HTML' }
+          );
+      }
+      
       break;
   }
 });
@@ -113,11 +141,13 @@ function scheduleRecurringPoll(msg) {
 
     const [hour, minute] = time.split(':').map(Number);
     const cronExpression = `0 ${minute} ${hour} * * ${day}`;
+    const taskId = `${day}-${hour}-${minute}-${Date.now()}`;
 
     let count = 0;
-    pollTasks[chatId] = cron.schedule(cronExpression, () => {
+    const task = cron.schedule(cronExpression, () => {
       if (count >= repeatCount) {
         pollTasks[chatId].stop();
+        pollTasks.delete(taskId);
         bot.sendMessage(chatId, "Recurring poll finished.");
         return;
       }
@@ -125,9 +155,25 @@ function scheduleRecurringPoll(msg) {
       sendRecurringPoll(chatId, day, time);
     });
 
-    bot.sendMessage(chatId, `Recurring poll scheduled for day ${day} at ${time}. ${repeatCount === Infinity ? 'Poll will repeat indefinitely.' : `Occurrences: ${repeatCount}.`}`);
+    pollTasks.set(taskId, { task, chatId, day, time, repeatCount });
+    bot.sendMessage(chatId, `Recurring poll scheduled for day ${daysMap[day]} at ${time}. ${repeatCount === Infinity ? 'Poll will repeat indefinitely.' : `Occurrences: ${repeatCount}.`}`);
   });
 }
+
+function showAllPolls(chatId) {
+    if (pollTasks.size === 0) {
+      bot.sendMessage(chatId, "No recurring polls scheduled.");
+      return;
+    }
+  
+    // Create inline keyboard with a cancel button for each poll
+    const pollButtons = Array.from(pollTasks).map(([id, { day, time }]) => [
+      { text: `Poll on ${daysMap[day]} at ${time}`, callback_data: `cancel_poll_${id}` }
+    ]);
+  
+    const keyboard = { reply_markup: { inline_keyboard: pollButtons } };
+    bot.sendMessage(chatId, "Here are your scheduled polls. Click on a poll you want to cancel:", keyboard);
+  }
 
 // Function to send a recurring poll
 function sendRecurringPoll(chatId, day, time) {
@@ -139,20 +185,21 @@ function sendRecurringPoll(chatId, day, time) {
     .catch((err) => console.error(`Failed to send recurring poll to chat ${chatId}:`, err));
 }
 
-// Cancel a recurring poll
-bot.onText(/\/cancel/, (msg) => {
-  const chatId = msg.chat.id;
+function cancelRecurringPoll(query) {
+    const taskId = query.data.replace('cancel_poll_', '');
+    const taskData = pollTasks.get(taskId);
 
-  if (pollTasks[chatId]) {
-    pollTasks[chatId].stop();
-    delete pollTasks[chatId];
-    bot.sendMessage(chatId, "Recurring poll canceled.");
-  } else {
-    bot.sendMessage(chatId, "No active recurring polls to cancel.");
-  }
-});
+    if (taskData) {
+      taskData.task.stop();
+      pollTasks.delete(taskId);
+      bot.answerCallbackQuery(query.id, { text: `Cancelled poll on ${daysMap[taskData.day]} at ${taskData.time}.` });
+      bot.sendMessage(query.message.chat.id, `Cancelled poll on ${daysMap[taskData.day]} at ${taskData.time}.`);
+    } else {
+      bot.answerCallbackQuery(query.id, { text: "Poll not found or already cancelled." });
+    }
+}
 
-function addPerson(msg) {
+function addParticipant(msg) {
     const chatId = msg.chat.id;
   
     bot.sendMessage(chatId, "Enter a name or names using (,) comma:", {
@@ -174,8 +221,8 @@ function addPerson(msg) {
     });
   }
   
-  bot.onText(/\/addPerson/, (msg) => {
-    addPerson(msg);
+  bot.onText(/\/add/, (msg) => {
+    addParticipant(msg);
   });
 
 // Handle poll answers
