@@ -8,6 +8,7 @@ const bot = new TelegramBot(token, { polling: true });
 
 // Store the chat members and polls
 let chatMembers = [];
+const peopleToAttend = [];
 let eventPollId = null;
 let manOfTheMatchPollId = null;
 let eventPollAnswers = [];
@@ -79,7 +80,7 @@ function sendEventPoll(chatId, eventTime) {
 // Function to send "Man of the Match" poll
 function sendManOfTheMatchPoll(chatId, eventTime) {
   const eventDateString = eventTime.format('dddd, MMMM Do YYYY');
-  bot.sendPoll(chatId, `Man of the Match: ${eventDateString}`, [...chatMembers, '-'])
+  bot.sendPoll(chatId, `Man of the Match: ${eventDateString}`, [...peopleToAttend, '-'])
     .then((poll) => {
       manOfTheMatchPollId = poll.poll.id;
       console.log(`Man of the Match poll sent to chat ${chatId}`);
@@ -151,6 +152,32 @@ bot.onText(/\/cancel/, (msg) => {
   }
 });
 
+function addPerson(msg) {
+    const chatId = msg.chat.id;
+  
+    bot.sendMessage(chatId, "Enter a name or names using (,) comma:", {
+      parse_mode: 'Markdown'
+    });
+  
+    bot.once('message', (nameMsg) => {
+      const names = nameMsg.text.split(',').map(name => name.trim());
+  
+      names.forEach(name => peopleToAttend.push(name));
+
+      const membersList = peopleToAttend
+        .map((member, index) => `${index + 1}. ${member}`)
+        .join('\n');
+  
+      const membersMessage = `<b>Participants:</b>\n${membersList}`;
+    
+    bot.sendMessage(chatId, membersMessage, { parse_mode: 'HTML' });
+    });
+  }
+  
+  bot.onText(/\/addPerson/, (msg) => {
+    addPerson(msg);
+  });
+
 // Handle poll answers
 bot.on('poll_answer', (pollAnswer) => {
   const pollId = pollAnswer.poll_id;
@@ -159,6 +186,10 @@ bot.on('poll_answer', (pollAnswer) => {
 
   if (pollId === eventPollId) {
     console.log(`User ${username} (ID: ${userId}) voted in the Event poll.`);
+    // make it more strict
+    if(pollAnswer.option_ids[0] === 0) {
+        peopleToAttend.push(username)
+    }
     chatMembers.push(username);
   }
 });
