@@ -6,7 +6,7 @@ const moment = require('moment-timezone');
 const token = '7630370286:AAGz6H5lbpJ1xDAqDkIV6f_NJcsQgmNMbtQ';
 const bot = new TelegramBot(token, { polling: true });
 
-const daysMap = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+const daysMap = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
 // Store the chat members and polls
 let chatMembers = [];
@@ -42,7 +42,6 @@ bot.onText(/start/, (msg) => {
 // Handling inline menu options
 bot.on('callback_query', (query) => {
   const chatId = query.message.chat.id;
-  const userId = query.from.id;
 
   if (query.data.startsWith('cancel_poll')) {
     cancelRecurringPoll(query)
@@ -106,9 +105,8 @@ function sendEventPoll(chatId, eventTime) {
 }
 
 // Function to send "Man of the Match" poll
-function sendManOfTheMatchPoll(chatId, eventTime) {
-  const eventDateString = eventTime.format('dddd, MMMM Do YYYY');
-  bot.sendPoll(chatId, `Man of the Match: ${eventDateString}`, [...peopleToAttend, '-'])
+function sendManOfTheMatchPoll(chatId) {
+  bot.sendPoll(chatId, 'Man of the Match:', [...peopleToAttend, '-'])
     .then((poll) => {
       manOfTheMatchPollId = poll.poll.id;
       console.log(`Man of the Match poll sent to chat ${chatId}`);
@@ -119,44 +117,57 @@ function sendManOfTheMatchPoll(chatId, eventTime) {
 // Function to schedule a recurring poll
 function scheduleRecurringPoll(msg) {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, "Please enter day, time and number of occurrences (optional) in the following format:\n\n*day (0-6) time [number]*\n\nExample: `0 15:00 10` or `3 18:30`", {
-    parse_mode: 'Markdown',
-  });
 
-  bot.once('message', (dateMsg) => {
-    const input = dateMsg.text.split(' ');
-    if (input.length < 2) {
-      bot.sendMessage(chatId, "Incorrect format. Please, enter day (0-6) and time.");
+  bot.sendMessage(chatId, "Enter the poll title and options, separated by commas:\nExample: `Event Poll, Yes, No`", { parse_mode: 'Markdown' });
+
+  bot.once('message', (pollMsg) => {
+    const pollInput = pollMsg.text.split(',').map(item => item.trim());
+
+    if (pollInput.length < 2) {
+      bot.sendMessage(chatId, "Incorrect format. Please, enter a title and at least one option.");
       return;
     }
 
-    const day = input[0];
-    const time = input[1];
-    const repeatCount = input[2] ? parseInt(input[2], 10) : Infinity;
+    const pollTitle = pollInput[0];
+    const pollOptions = pollInput.slice(1);
 
-    if (isNaN(day) || day < 0 || day > 6 || !moment(time, 'HH:mm', true).isValid()) {
-      bot.sendMessage(chatId, "Incorrect day or time format. Please try again.");
-      return;
-    }
+    bot.sendMessage(chatId, "Please enter day (0-6) and time in format `day time [number of occurrences]`:\nExample: `0 15:00 10`", { parse_mode: 'Markdown' });
 
-    const [hour, minute] = time.split(':').map(Number);
-    const cronExpression = `0 ${minute} ${hour} * * ${day}`;
-    const taskId = `${day}-${hour}-${minute}-${Date.now()}`;
-
-    let count = 0;
-    const task = cron.schedule(cronExpression, () => {
-      if (count >= repeatCount) {
-        pollTasks[chatId].stop();
-        pollTasks.delete(taskId);
-        bot.sendMessage(chatId, "Recurring poll finished.");
+    bot.once('message', (dateMsg) => {
+      const input = dateMsg.text.split(' ');
+      if (input.length < 2) {
+        bot.sendMessage(chatId, "Incorrect format. Please, enter day and time.");
         return;
       }
-      count++;
-      sendRecurringPoll(chatId, day, time);
-    });
 
-    pollTasks.set(taskId, { task, chatId, day, time, repeatCount });
-    bot.sendMessage(chatId, `Recurring poll scheduled for day ${daysMap[day]} at ${time}. ${repeatCount === Infinity ? 'Poll will repeat indefinitely.' : `Occurrences: ${repeatCount}.`}`);
+      const day = parseInt(input[0]);
+      const time = input[1];
+      const repeatCount = input[2] ? parseInt(input[2], 10) : Infinity;
+
+      if (isNaN(day) || day < 0 || day > 6 || !moment(time, 'HH:mm', true).isValid()) {
+        bot.sendMessage(chatId, "Incorrect day or time format. Please try again.");
+        return;
+      }
+
+      const [hour, minute] = time.split(':').map(Number);
+      const cronExpression = `0 ${minute} ${hour} * * ${day}`;
+      const taskId = `${day}-${hour}-${minute}-${Date.now()}`;
+
+      let count = 0;
+      const task = cron.schedule(cronExpression, () => {
+        if (count >= repeatCount) {
+          pollTasks[chatId].stop();
+          pollTasks.delete(taskId);
+          bot.sendMessage(chatId, "Recurring poll finished.");
+          return;
+        }
+        count++;
+        sendRecurringPoll(chatId, pollTitle, pollOptions);
+      });
+
+      pollTasks.set(taskId, { task, chatId, day, time, repeatCount, pollTitle });
+      bot.sendMessage(chatId, `Recurring poll scheduled: ${pollTitle}. Day: ${daysMap[day]} at ${time}. ${repeatCount === Infinity ? 'Poll will repeat indefinitely.' : `Occurrences: ${repeatCount}.`}`);
+    });
   });
 }
 
@@ -165,24 +176,26 @@ function showAllPolls(chatId) {
       bot.sendMessage(chatId, "No recurring polls scheduled.");
       return;
     }
-  
+
     // Create inline keyboard with a cancel button for each poll
-    const pollButtons = Array.from(pollTasks).map(([id, { day, time }]) => [
-      { text: `Poll on ${daysMap[day]} at ${time}`, callback_data: `cancel_poll_${id}` }
-    ]);
+    const pollButtons = Array.from(pollTasks).map(([id, { day, time, pollTitle }]) => {
+        return [
+            { text: `${pollTitle} on ${daysMap[day]} at ${time}`, callback_data: `cancel_poll_${id}` }
+        ]
+    });
   
     const keyboard = { reply_markup: { inline_keyboard: pollButtons } };
     bot.sendMessage(chatId, "Here are your scheduled polls. Click on a poll you want to cancel:", keyboard);
   }
 
 // Function to send a recurring poll
-function sendRecurringPoll(chatId, day, time) {
+function sendRecurringPoll(chatId, title, options) {
   const eventTime = moment().day(day).hour(parseInt(time.split(':')[0])).minute(parseInt(time.split(':')[1]));
   const eventDateString = eventTime.format('dddd, MMMM Do YYYY, HH:mm');
 
-  bot.sendPoll(chatId, `Football Event: ${eventDateString}`, ['Yes', 'No'], { is_anonymous: false })
-    .then(() => console.log(`Recurring poll sent to chat ${chatId}`))
-    .catch((err) => console.error(`Failed to send recurring poll to chat ${chatId}:`, err));
+  bot.sendPoll(chatId, title, options, { is_anonymous: false })
+    .then(() => console.log(`Recurring poll "${title}" sent to chat ${chatId}`))
+    .catch((err) => console.error(`Failed to send recurring poll "${title}" to chat ${chatId}:`, err));
 }
 
 function cancelRecurringPoll(query) {
@@ -199,9 +212,7 @@ function cancelRecurringPoll(query) {
     }
 }
 
-function addParticipant(msg) {
-    const chatId = msg.chat.id;
-  
+function addParticipant(chatId) {  
     bot.sendMessage(chatId, "Enter a name or names using (,) comma:", {
       parse_mode: 'Markdown'
     });
